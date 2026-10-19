@@ -1,0 +1,30 @@
+[
+ {
+  "turns": 97,
+  "model_ms_per_call": 0.0,
+  "model_calls_per_turn": 2,
+  "end_grace_ms": 250.0,
+  "filler_after_ms": 800.0,
+  "first_output_p50_ms": 279.5,
+  "first_output_p95_ms": 294.7,
+  "agent_turn_p50_ms": 28.4,
+  "agent_turn_p95_ms": 43.2,
+  "search_p50_ms": 27.3,
+  "search_p95_ms": 41.6,
+  "fillers": 0
+ },
+ {
+  "turns": 97,
+  "model_ms_per_call": 400.0,
+  "model_calls_per_turn": 2,
+  "end_grace_ms": 250.0,
+  "filler_after_ms": 800.0,
+  "first_output_p50_ms": 1052.3,
+  "first_output_p95_ms": 1054.0,
+  "agent_turn_p50_ms": 831.9,
+  "agent_turn_p95_ms": 842.2,
+  "search_p50_ms": 30.0,
+  "search_p95_ms": 39.8,
+  "fillers": 97
+ }
+]

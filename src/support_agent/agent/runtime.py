@@ -59,7 +59,8 @@ class AgentState:
     guard: ConversationState = field(default_factory=ConversationState)
     pending: dict[str, dict] = field(default_factory=dict)  # call id -> {"name", "arguments"}
     events: list[dict] = field(default_factory=list)
-    usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "model_calls": 0})
+    usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+                                                 "cache_write_tokens": 0, "model_calls": 0})
 
 
 @dataclass
@@ -116,10 +117,9 @@ class SupportAgent:
                 state.events.append({"kind": "model_error", "error": str(exc)[:300]})
                 return Reply("I'm sorry, I'm having trouble right now. Let me transfer you to a colleague who can help.")
             state.usage["model_calls"] += 1
-            state.usage["input_tokens"] += resp.input_tokens
-            state.usage["output_tokens"] += resp.output_tokens
+            _add_usage(state.usage, resp)
             state.events.append({"kind": "model", "ms": round((time.perf_counter() - t) * 1000, 1),
-                                 "tools": [c.name for c in resp.tool_calls]})
+                                 "tools": [c.name for c in resp.tool_calls], "cached": resp.cache_read_tokens})
             calls = [ToolCall(c.id or f"call_{uuid.uuid4().hex[:10]}", c.name, c.arguments) for c in resp.tool_calls]
             state.messages.append({"role": "assistant", "content": resp.text,
                                    "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls]})
@@ -146,6 +146,23 @@ class SupportAgent:
                 return BankCalls(outgoing)
         state.events.append({"kind": "step_budget"})
         return Reply("Let me look into this a little more. Could you tell me a bit more about what you need?")
+
+    def warm(self, state: AgentState) -> bool:
+        """Pre-write the model's prompt cache for this agent's tools + system prompt, so the first turn does not pay
+        for reading them cold. A no-op (False) for models without ``warm``; a failure is recorded, never raised."""
+        warm = getattr(self.llm, "warm", None)
+        if warm is None:
+            return False
+        t = time.perf_counter()
+        try:
+            resp = warm(self.system, self.specs)
+        except LLMError as exc:
+            state.events.append({"kind": "warm_error", "error": str(exc)[:300]})
+            return False
+        _add_usage(state.usage, resp)
+        state.events.append({"kind": "warm", "ms": round((time.perf_counter() - t) * 1000, 1),
+                             "cache_write_tokens": resp.cache_write_tokens, "cache_read_tokens": resp.cache_read_tokens})
+        return True
 
     def _tool_result(self, state: AgentState, call: ToolCall, content: str, error: bool = False) -> None:
         state.messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": content,
@@ -192,6 +209,11 @@ def _normalise_args(name: str, args: dict) -> dict:
     return dict(args)
 
 
+def _add_usage(usage: dict, resp) -> None:
+    for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+        usage[key] += getattr(resp, key)
+
+
 def _wire(messages: list[dict]) -> list[dict]:
     out = []
     for m in messages:
@@ -230,6 +252,9 @@ class LocalSession:
                 results.append((c.id, content, err))
             self.agent.on_tool_results(self.state, results)
         return "Sorry, that took too many steps. Let me transfer you to a colleague."
+
+    def warm(self) -> bool:
+        return self.agent.warm(self.state)
 
     def trace(self) -> dict[str, Any]:
         return {"guard": self.state.guard.to_dict(), "events": self.state.events, "usage": self.state.usage}

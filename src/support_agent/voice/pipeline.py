@@ -11,6 +11,7 @@ CARTESIA_API_KEY and a model key (ANTHROPIC_API_KEY or OPENAI_API_KEY), plus
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 GREETING = "Thanks for calling Rho-Bank. How can I help you today?"
@@ -83,14 +84,18 @@ async def bot(runner_args) -> None:
         cartesia_key=os.environ["CARTESIA_API_KEY"], voice_id=os.environ.get("CARTESIA_VOICE_ID"))
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
 
+    warming: list[asyncio.Task] = []
+
     @transport.event_handler("on_client_connected")
     async def _connected(_transport, _client):
+        # Write the model's prompt cache while the greeting plays, so the caller's first turn starts warm.
+        warming.append(asyncio.ensure_future(asyncio.to_thread(session.warm)))
         await task.queue_frames([TTSSpeakFrame(GREETING)])
 
     @transport.event_handler("on_client_disconnected")
     async def _disconnected(_transport, _client):
         logger.info(f"latency to first text: {text_lat.summary()}; to first audio: {audio_lat.summary()}")
-        logger.info(f"guard: {session.trace()['guard']}")
+        logger.info(f"guard: {session.trace()['guard']}; usage: {session.trace()['usage']}")
         await task.cancel()
 
     await PipelineRunner(handle_sigint=runner_args.handle_sigint).run(task)

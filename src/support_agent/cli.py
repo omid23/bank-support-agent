@@ -115,6 +115,7 @@ def cmd_chat(a) -> int:
                 if e["kind"] in ("search", "guard", "bank"):
                     print("   ", json.dumps(e)[:200])
     print(json.dumps(session.trace()["guard"], indent=1))
+    print("usage:", json.dumps(session.trace()["usage"]))
     return 0
 
 

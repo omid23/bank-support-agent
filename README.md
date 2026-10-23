@@ -50,12 +50,18 @@ Every bank call goes through the guard before it runs. The rules it enforces:
 
 A blocked call never reaches the bank. The model gets the rule and how to fix it ("verify the customer first…"). Ids the guard has never seen, such as an account created earlier in the call, are noted as advisory rather than blocked, because the bank's own tools reject ids that don't exist.
 
+**Model calls** (`agent/llm.py`)
+- An agent turn makes several model calls, and each one resends the policy, the system prompt and every tool schema (about 4K tokens before the conversation starts). The Anthropic adapter caches them: a breakpoint on the system block covers tools and system, and automatic caching moves forward with the conversation, so each call reads the previous call's prefix and only processes the new tail.
+- `usage` in a session trace splits input into uncached, cache-read and cache-written tokens, for both adapters (OpenAI caches long prefixes on its own and reports `cached_tokens`).
+- `AnthropicLLM(cache=False)` sends plain requests, for gateways that reject `cache_control`. Retries follow the server's `retry-after` (capped at 30 s) before falling back to exponential backoff.
+
 **τ³-bench integration** (`agent/tau2_plugin.py`)
 - The agent is a tau2 `HalfDuplexAgent`, registered as `guarded_rag_agent`, so tau2's own runner, user simulator and grader run it unchanged.
 - Ownership checks read the live tau2 database, so they cover rows the task seeds and rows created during the conversation.
 
 **Voice** (`voice/`, Pipecat 1.12)
 `AgentProcessor` takes the place of the LLM service in a cascaded pipeline:
+- When the caller connects, the bot writes the model's prompt cache (a `max_tokens: 0` request) while the greeting plays, so the first turn doesn't wait for a cold read of the policy and tools.
 - It collects final transcripts for a turn and waits a short grace period for a late one.
 - It runs the agent off the event loop, so audio keeps flowing while the agent searches and calls tools.
 - If the turn takes longer than 800 ms, it says a filler ("One moment while I check that.").
@@ -174,7 +180,7 @@ src/support_agent/
   eval/        tasks and split, retrieval, guard and harness evals
   web/         console
   data/rho_bank/   τ³-bench banking data (MIT, Sierra), pinned commit in SOURCE
-tests/         54 tests; tau2 and voice tests skip when those extras are missing
+tests/         59 tests; tau2 and voice tests skip when those extras are missing
 reports/       the numbers above
 ```
 

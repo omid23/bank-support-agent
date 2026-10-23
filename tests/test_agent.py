@@ -146,3 +146,95 @@ def test_scripted_llm_exhausts():
     llm.complete("s", [], [])
     with pytest.raises(LLMError):
         llm.complete("s", [], [])
+
+
+def _capturing_anthropic(bodies: list, usage: dict | None = None, **kwargs) -> AnthropicLLM:
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn",
+                                         "usage": usage or {}})
+
+    return AnthropicLLM(client=httpx.Client(transport=httpx.MockTransport(handler)), **kwargs)
+
+
+def test_anthropic_prompt_caching(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    bodies: list = []
+    llm = _capturing_anthropic(bodies, {"input_tokens": 40, "output_tokens": 3, "cache_read_input_tokens": 3900,
+                                        "cache_creation_input_tokens": 120})
+    tools = base_tool_specs()
+    r = llm.complete("policy", [{"role": "user", "content": "hi"}], tools)
+    assert (r.input_tokens, r.cache_read_tokens, r.cache_write_tokens) == (40, 3900, 120)
+    llm.warm("policy", tools)
+    real, warm = bodies
+    # tools + system cached by the marker on the system block; the conversation tail by automatic caching
+    assert real["system"] == [{"type": "text", "text": "policy", "cache_control": {"type": "ephemeral"}}]
+    assert real["cache_control"] == {"type": "ephemeral"}
+    # the pre-warm writes exactly the prefix the real call reads, and nothing after it
+    assert warm["max_tokens"] == 0 and "cache_control" not in warm
+    assert json.dumps([warm["tools"], warm["system"]]) == json.dumps([real["tools"], real["system"]])
+
+
+def test_anthropic_caching_off(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    bodies: list = []
+    llm = _capturing_anthropic(bodies, cache=False)
+    llm.complete("policy", [{"role": "user", "content": "hi"}], [])
+    assert bodies[0]["system"] == "policy" and "cache_control" not in bodies[0]
+    with pytest.raises(LLMError):
+        llm.warm("policy", [])
+
+
+def test_openai_cached_tokens(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                                         "usage": {"prompt_tokens": 5000, "completion_tokens": 9,
+                                                   "prompt_tokens_details": {"cached_tokens": 4864}}})
+
+    r = OpenAICompatLLM(client=httpx.Client(transport=httpx.MockTransport(handler))).complete("s", [], [])
+    assert (r.input_tokens, r.cache_read_tokens, r.output_tokens) == (136, 4864, 9)
+
+
+def test_retry_after_is_honoured(monkeypatch):
+    from support_agent.agent import llm as llm_mod
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    slept: list[float] = []
+    monkeypatch.setattr(llm_mod.time, "sleep", slept.append)
+    replies = iter([httpx.Response(429, headers={"retry-after": "2"}, text="slow down"),
+                    httpx.Response(529, headers={"retry-after": "9999"}, text="overloaded"),
+                    httpx.Response(503, text="unavailable"),
+                    httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})])
+    llm = AnthropicLLM(client=httpx.Client(transport=httpx.MockTransport(lambda req: next(replies))))
+    assert llm.complete("s", [{"role": "user", "content": "x"}], []).text == "ok"
+    assert slept == [2.0, llm_mod.MAX_RETRY_AFTER, 4]  # header, capped header, then exponential backoff
+
+
+def test_agent_warm_and_cache_usage(guard, searcher):
+    class WarmLLM(ScriptedLLM):
+        def __init__(self, script, fail=False):
+            super().__init__(script)
+            self.warmed, self.fail = [], fail
+
+        def warm(self, system, tools):
+            if self.fail:
+                raise LLMError("HTTP 400: bad request")
+            self.warmed.append((system, [t.name for t in tools]))
+            return LLMResponse("", cache_write_tokens=3800)
+
+    llm = WarmLLM([LLMResponse("Hello.", input_tokens=12, output_tokens=2, cache_read_tokens=3800)])
+    agent = SupportAgent(llm, base_tool_specs(), guard, searcher, policy_text())
+    session = LocalSession(agent, ScriptedBackend(base_tool_specs()))
+    assert session.warm() is True
+    assert llm.warmed == [(agent.system, [t.name for t in agent.specs])]
+    session.send("hi")
+    usage = session.trace()["usage"]
+    assert (usage["cache_write_tokens"], usage["cache_read_tokens"], usage["input_tokens"]) == (3800, 3800, 12)
+    assert [e["kind"] for e in session.state.events][:2] == ["warm", "model"]
+
+    assert _agent([], guard, searcher).warm(AgentState()) is False  # model without warm(): nothing to do
+    failing = SupportAgent(WarmLLM([], fail=True), base_tool_specs(), guard, searcher, policy_text())
+    state = AgentState()
+    assert failing.warm(state) is False and state.events[-1]["kind"] == "warm_error"

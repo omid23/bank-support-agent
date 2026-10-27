@@ -105,7 +105,7 @@ def create_guarded_agent(tools, domain_policy, **kwargs):
 
     llm_name = kwargs.get("llm") or "anthropic/claude-sonnet-5-5"
     provider, _, model = llm_name.partition("/")
-    if provider not in ("anthropic", "openai"):
+    if provider not in ("anthropic", "vertex", "openai"):
         provider, model = "openai", llm_name
     cls = make_tau2_agent_class()
     return cls(tools, domain_policy, make_llm(provider, model or None), task=kwargs.get("task"))

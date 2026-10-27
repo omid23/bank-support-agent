@@ -122,7 +122,8 @@ def cmd_chat(a) -> int:
 def cmd_voice(a) -> int:
     missing = [k for k in ("DEEPGRAM_API_KEY", "CARTESIA_API_KEY") if not os.environ.get(k)]
     if missing:
-        print(f"set {', '.join(missing)} (and ANTHROPIC_API_KEY or OPENAI_API_KEY)", file=sys.stderr)
+        print(f"set {', '.join(missing)} (and ANTHROPIC_API_KEY, ANTHROPIC_VERTEX_PROJECT_ID or OPENAI_API_KEY)",
+              file=sys.stderr)
         return 2
     from pipecat.runner.run import main as pipecat_main
 
@@ -201,7 +202,8 @@ def main(argv: list[str] | None = None) -> int:
     for name, fn, hlp in (("chat", cmd_chat, "chat with the agent in the terminal (needs a model key)"),
                           ("voice", cmd_voice, "talk to the agent in the browser over WebRTC [voice]")):
         s = sub.add_parser(name, help=hlp)
-        s.add_argument("--llm", help="provider/model, e.g. anthropic/claude-sonnet-5-5 or openai/gpt-5")
+        s.add_argument("--llm", help="provider/model, e.g. anthropic/claude-sonnet-5-5, vertex/claude-sonnet-5-5 "
+                                         "or openai/gpt-5")
         s.add_argument("--task", help="seed the bank with a τ³ task's customers, e.g. task_026")
         if name == "chat":
             s.add_argument("--trace", action="store_true")

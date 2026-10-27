@@ -112,11 +112,13 @@ def create_app() -> Starlette:
         return JSONResponse(out)
 
     def _has_model() -> bool:
-        return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+        from ..agent.llm import MODEL_ENV
+
+        return any(os.environ.get(k) for k in MODEL_ENV)
 
     async def chat(req: Request):
         if not _has_model():
-            return JSONResponse({"error": "Set ANTHROPIC_API_KEY or OPENAI_API_KEY to chat with the agent."}, 503)
+            return JSONResponse({"error": "Set ANTHROPIC_API_KEY, ANTHROPIC_VERTEX_PROJECT_ID or OPENAI_API_KEY to chat with the agent."}, 503)
         body = await req.json()
         text = str(body.get("text", "")).strip()[:2000]
         sid = str(body.get("session") or uuid.uuid4().hex)

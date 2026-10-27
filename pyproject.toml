@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 # tau2-bench needs its source checkout for data: install it with scripts/install_tau2.sh (Python 3.12+).
 tau2 = ["rank-bm25>=0.2.2", "websockets>=13"]
+vertex = ["google-auth[requests]>=2.20"]  # Claude on Google Cloud Vertex AI
 voice = ["pipecat-ai[cartesia,deepgram,runner,silero,webrtc]>=1.12,<2"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "rank-bm25>=0.2.2"]
 

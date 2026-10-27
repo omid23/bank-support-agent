@@ -204,7 +204,7 @@ async function init() {
   TASKS = t.tasks; PERTS = t.perturbations;
   renderTasks();
   if (!chatOK) {
-    $("#log").innerHTML = '<p class="empty">Chat needs a model. Set ANTHROPIC_API_KEY or OPENAI_API_KEY and restart the console.</p>';
+    $("#log").innerHTML = '<p class="empty">Chat needs a model. Set ANTHROPIC_API_KEY, ANTHROPIC_VERTEX_PROJECT_ID or OPENAI_API_KEY and restart the console.</p>';
     $("#say").disabled = $("#send").disabled = true;
   }
 }

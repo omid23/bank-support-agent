@@ -5,7 +5,7 @@
                          knowledge search · policy guard · bank tools (τ³ bank)
 
 Run with ``support-agent voice`` (SmallWebRTC; open the printed URL). Needs DEEPGRAM_API_KEY,
-CARTESIA_API_KEY and a model key (ANTHROPIC_API_KEY or OPENAI_API_KEY), plus
+CARTESIA_API_KEY and a model (ANTHROPIC_API_KEY, ANTHROPIC_VERTEX_PROJECT_ID or OPENAI_API_KEY), plus
 ``pip install 'bank-support-agent[voice,tau2]'``.
 """
 
@@ -21,7 +21,7 @@ DEFAULT_VOICE = "71a7ad14-091c-4e8e-a314-022ece01c121"  # a Cartesia stock voice
 def make_session(llm_name: str | None = None, task_id: str | None = None):
     """A LocalSession against the τ³ bank (or canned tools when tau2 is not installed)."""
     from ..agent.backend import ScriptedBackend, base_tool_specs
-    from ..agent.llm import make_llm
+    from ..agent.llm import default_llm_name, make_llm
     from ..agent.runtime import LocalSession, SupportAgent
     from ..agent.tau2_plugin import shared_searcher
     from ..guard.policy import PolicyGuard
@@ -33,7 +33,7 @@ def make_session(llm_name: str | None = None, task_id: str | None = None):
         backend = Tau2Backend(task_id)
     except ImportError:
         backend = ScriptedBackend(base_tool_specs())
-    provider, _, model = (llm_name or os.environ.get("SUPPORT_AGENT_LLM", "anthropic/claude-sonnet-5-5")).partition("/")
+    provider, _, model = (llm_name or default_llm_name()).partition("/")
     agent = SupportAgent(make_llm(provider, model or None), backend.tool_specs(), PolicyGuard(backend.ownership()),
                          shared_searcher(), policy_text())
     return LocalSession(agent, backend)

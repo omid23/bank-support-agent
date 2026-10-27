@@ -20,7 +20,7 @@ Support automation fails in three ways that τ³-Banking captures well:
 caller ── chat, or voice: Silero VAD → Deepgram STT → turn detection ──┐
                                                                       ▼
                          ┌──────────── SupportAgent (agent/runtime.py) ────────────┐
-                         │ model (Anthropic / OpenAI-compatible, plain httpx)       │
+                         │ model (Anthropic / Vertex AI / OpenAI-compat, httpx)     │
                          │   ├─ search_knowledge ─▶ hybrid retrieval (kb/search.py) │
                          │   ├─ read_document    ─▶ full text + tool signatures     │
                          │   └─ bank tool call   ─▶ PolicyGuard.check (≈8 µs)       │
@@ -53,6 +53,7 @@ A blocked call never reaches the bank. The model gets the rule and how to fix it
 **Model calls** (`agent/llm.py`)
 - An agent turn makes several model calls, and each one resends the policy, the system prompt and every tool schema (about 4K tokens before the conversation starts). The Anthropic adapter caches them: a breakpoint on the system block covers tools and system, and automatic caching moves forward with the conversation, so each call reads the previous call's prefix and only processes the new tail.
 - `usage` in a session trace splits input into uncached, cache-read and cache-written tokens, for both adapters (OpenAI caches long prefixes on its own and reports `cached_tokens`).
+- Claude on Google Cloud Vertex AI (`vertex/claude-sonnet-5-5`) sends the same request, caching included, to Vertex's `rawPredict` endpoint with a Google OAuth token from Application Default Credentials. It reads `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` (default `global`), the same variables as Anthropic's SDK. With a Vertex project set and no `ANTHROPIC_API_KEY`, chat and voice use Vertex by default.
 - `AnthropicLLM(cache=False)` sends plain requests, for gateways that reject `cache_control`. Retries follow the server's `retry-after` (capped at 30 s) before falling back to exponential backoff.
 
 **τ³-bench integration** (`agent/tau2_plugin.py`)
@@ -151,6 +152,7 @@ Python 3.10+ for the core; tau2-bench needs 3.12+.
 pip install -e ".[dev]"                      # core: retrieval, guard, console, evals
 bash scripts/install_tau2.sh                 # tau2-bench at the pinned commit, from source (3.12+)
 pip install -e ".[voice]"                    # Pipecat with Deepgram, Cartesia, Silero, WebRTC
+pip install -e ".[vertex]"                   # Claude on Google Cloud Vertex AI (google-auth)
 
 support-agent search "I was charged twice at a hotel"
 support-agent eval-retrieval --split dev --out reports/retrieval_dev
@@ -163,6 +165,9 @@ support-agent serve                                               # console on h
 support-agent chat --task task_026 --trace                        # terminal chat against the τ³ bank
 support-agent voice --task task_026                               # browser call over WebRTC
 support-agent tau2-run --llm anthropic/claude-sonnet-5-5 --trials 4   # the real benchmark
+
+# Claude on Vertex AI: gcloud auth application-default login, then
+ANTHROPIC_VERTEX_PROJECT_ID=my-project support-agent chat --llm vertex/claude-sonnet-5-5
 ```
 
 - `--task` seeds the bank with that task's customers, so you can play the customer.
@@ -180,7 +185,7 @@ src/support_agent/
   eval/        tasks and split, retrieval, guard and harness evals
   web/         console
   data/rho_bank/   τ³-bench banking data (MIT, Sierra), pinned commit in SOURCE
-tests/         59 tests; tau2 and voice tests skip when those extras are missing
+tests/         65 tests; tau2 and voice tests skip when those extras are missing
 reports/       the numbers above
 ```
 

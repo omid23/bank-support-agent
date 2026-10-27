@@ -45,8 +45,8 @@ def test_tasks_and_reports(client, tmp_path, monkeypatch):
 
 
 def test_chat_needs_a_model(client, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID", "OPENAI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
     assert client.post("/api/chat", json={"text": "hi"}).status_code == 503
 
 

@@ -238,3 +238,119 @@ def test_agent_warm_and_cache_usage(guard, searcher):
     failing = SupportAgent(WarmLLM([], fail=True), base_tool_specs(), guard, searcher, policy_text())
     state = AgentState()
     assert failing.warm(state) is False and state.events[-1]["kind"] == "warm_error"
+
+
+def _vertex(bodies: list, urls: list, headers: list, **kwargs):
+    from support_agent.agent.llm import VertexLLM
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        urls.append(str(req.url))
+        headers.append(req.headers)
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn",
+                                         "usage": {"input_tokens": 7, "cache_read_input_tokens": 3900}})
+
+    kwargs.setdefault("token_provider", lambda: "ya29.token")
+    return VertexLLM(client=httpx.Client(transport=httpx.MockTransport(handler)), **kwargs)
+
+
+def test_vertex_request(monkeypatch):
+    for key in ("CLOUD_ML_REGION", "ANTHROPIC_VERTEX_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    bodies, urls, headers = [], [], []
+    llm = _vertex(bodies, urls, headers, project_id="bank-prod")
+    tools = base_tool_specs()
+    r = llm.complete("policy", [{"role": "user", "content": "hi"}], tools)
+    assert r.text == "hi" and r.cache_read_tokens == 3900
+    assert urls[0] == ("https://aiplatform.googleapis.com/v1/projects/bank-prod/locations/global/publishers/"
+                       "anthropic/models/claude-sonnet-5-5:rawPredict")
+    assert headers[0]["authorization"] == "Bearer ya29.token" and "x-api-key" not in headers[0]
+    body = bodies[0]
+    assert "model" not in body and body["anthropic_version"] == "vertex-2023-10-16"
+    # caching and the pre-warm carry over from the Anthropic adapter unchanged
+    assert body["system"][0]["cache_control"] == {"type": "ephemeral"} and body["cache_control"] == {"type": "ephemeral"}
+    llm.warm("policy", tools)
+    assert bodies[1]["max_tokens"] == 0 and json.dumps([bodies[1]["tools"], bodies[1]["system"]]) == \
+        json.dumps([body["tools"], body["system"]])
+
+
+@pytest.mark.parametrize("region, host", [("us-east5", "https://us-east5-aiplatform.googleapis.com/v1"),
+                                          ("eu", "https://aiplatform.eu.rep.googleapis.com/v1")])
+def test_vertex_regions_from_env(monkeypatch, region, host):
+    monkeypatch.setenv("CLOUD_ML_REGION", region)
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "bank-prod")
+    monkeypatch.delenv("ANTHROPIC_VERTEX_BASE_URL", raising=False)
+    urls: list = []
+    _vertex([], urls, [], model="claude-opus-5-5").complete("s", [{"role": "user", "content": "x"}], [])
+    assert urls[0] == f"{host}/projects/bank-prod/locations/{region}/publishers/anthropic/models/claude-opus-5-5:rawPredict"
+
+
+def test_vertex_auth_and_project_errors(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+    with pytest.raises(ValueError, match="ANTHROPIC_VERTEX_PROJECT_ID"):
+        _vertex([], [], [])
+
+    def expired():
+        raise RuntimeError("Reauthentication is needed")
+
+    llm = _vertex([], [], [], project_id="p", token_provider=expired)
+    with pytest.raises(LLMError, match="Google Cloud auth failed"):  # the runtime turns this into a polite handoff
+        llm.complete("s", [{"role": "user", "content": "x"}], [])
+
+
+def test_vertex_application_default_credentials(monkeypatch):
+    import sys
+    import types
+
+    from support_agent.agent.llm import CLOUD_PLATFORM_SCOPE
+
+    class Creds:
+        token, expired, refreshed = None, False, 0
+
+        def refresh(self, request):
+            self.refreshed += 1
+            self.token, self.expired = f"tok{self.refreshed}", False
+
+    creds, seen = Creds(), {}
+
+    def default(scopes):
+        seen["scopes"] = scopes
+        return creds, "adc-project"
+
+    google = types.ModuleType("google")
+    auth = types.ModuleType("google.auth")
+    auth.default = default
+    transport = types.ModuleType("google.auth.transport")
+    requests_mod = types.ModuleType("google.auth.transport.requests")
+    requests_mod.Request = object
+    google.auth = auth
+    monkeypatch.setitem(sys.modules, "google", google)
+    monkeypatch.setitem(sys.modules, "google.auth", auth)
+    monkeypatch.setitem(sys.modules, "google.auth.transport", transport)
+    monkeypatch.setitem(sys.modules, "google.auth.transport.requests", requests_mod)
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+
+    urls, headers = [], []
+    llm = _vertex([], urls, headers, token_provider=None)
+    assert seen["scopes"] == [CLOUD_PLATFORM_SCOPE] and llm.project_id == "adc-project"
+    msgs = [{"role": "user", "content": "x"}]
+    llm.complete("s", msgs, [])
+    llm.complete("s", msgs, [])
+    creds.expired = True
+    llm.complete("s", msgs, [])
+    assert [h["authorization"] for h in headers] == ["Bearer tok1", "Bearer tok1", "Bearer tok2"]
+    assert "/projects/adc-project/" in urls[0]
+
+
+def test_default_llm_name(monkeypatch):
+    from support_agent.agent.llm import default_llm_name
+
+    for key in ("SUPPORT_AGENT_LLM", "ANTHROPIC_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID"):
+        monkeypatch.delenv(key, raising=False)
+    assert default_llm_name() == "anthropic/claude-sonnet-5-5"
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "bank-prod")
+    assert default_llm_name() == "vertex/claude-sonnet-5-5"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    assert default_llm_name() == "anthropic/claude-sonnet-5-5"  # an Anthropic key wins when both are set
+    monkeypatch.setenv("SUPPORT_AGENT_LLM", "openai/gpt-5")
+    assert default_llm_name() == "openai/gpt-5"

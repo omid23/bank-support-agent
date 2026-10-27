@@ -1,4 +1,5 @@
-"""Model adapters with tool calling: Anthropic Messages API and OpenAI-compatible chat.
+"""Model adapters with tool calling: Anthropic Messages API (direct or on Google Cloud Vertex AI) and
+OpenAI-compatible chat.
 
 The agent works on a provider-neutral transcript:
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -156,11 +158,17 @@ class AnthropicLLM:
             body["system"] = system
         return body
 
+    def _url(self) -> str:
+        return f"{self.base_url}/v1/messages"
+
+    def _headers(self) -> dict:
+        return {"x-api-key": os.environ.get(self.api_key_env, ""), "anthropic-version": "2023-06-01",
+                "content-type": "application/json"}
+
     def _post(self, body: dict) -> tuple[dict, float]:
-        headers = {"x-api-key": os.environ.get(self.api_key_env, ""), "anthropic-version": "2023-06-01",
-                   "content-type": "application/json"}
+        url, headers = self._url(), self._headers()
         started = time.perf_counter()
-        data = _post_with_retry(self._client, f"{self.base_url}/v1/messages", headers, body, self.retries)
+        data = _post_with_retry(self._client, url, headers, body, self.retries)
         return data, (time.perf_counter() - started) * 1000
 
     def complete(self, system: str, messages: list[dict], tools: Sequence[ToolSpec]) -> LLMResponse:
@@ -195,6 +203,85 @@ class AnthropicLLM:
                            int(usage.get("output_tokens") or 0), data.get("model", self.model), ms,
                            int(usage.get("cache_read_input_tokens") or 0),
                            int(usage.get("cache_creation_input_tokens") or 0))
+
+
+VERTEX_VERSION = "vertex-2023-10-16"  # Vertex's body-field counterpart of anthropic-version 2023-06-01
+CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+
+def vertex_base_url(region: str) -> str:
+    if region == "global":
+        return "https://aiplatform.googleapis.com/v1"
+    if region in ("us", "eu"):  # multi-region endpoints
+        return f"https://aiplatform.{region}.rep.googleapis.com/v1"
+    return f"https://{region}-aiplatform.googleapis.com/v1"
+
+
+class _ADCToken:
+    """Google Application Default Credentials (``gcloud auth application-default login``, a service account, or
+    the metadata server), refreshed when they expire."""
+
+    def __init__(self):
+        try:
+            import google.auth
+            from google.auth.transport.requests import Request
+        except ImportError as exc:
+            raise ImportError("Claude on Vertex AI needs google-auth: pip install 'bank-support-agent[vertex]'") from exc
+        self.credentials, self.project_id = google.auth.default(scopes=[CLOUD_PLATFORM_SCOPE])
+        self._request = Request
+        self._lock = threading.Lock()
+
+    def __call__(self) -> str:
+        with self._lock:
+            if self.credentials.expired or not self.credentials.token:
+                self.credentials.refresh(self._request())
+            return self.credentials.token
+
+
+class VertexLLM(AnthropicLLM):
+    """Claude on Google Cloud Vertex AI.
+
+    The same Messages request as ``AnthropicLLM`` (prompt caching and ``warm()`` included), with the model moved
+    from the body into the URL, ``anthropic_version`` in the body, and a Google OAuth token instead of an API key.
+    Model ids are the first-party ones (``claude-sonnet-5-5``).
+
+    Project and region come from the arguments, else ``ANTHROPIC_VERTEX_PROJECT_ID`` and ``CLOUD_ML_REGION``
+    (default ``global``); the project falls back to the one the Google credentials belong to.
+    ``ANTHROPIC_VERTEX_BASE_URL`` overrides the endpoint, for a proxy or Private Service Connect.
+    """
+
+    name = "vertex"
+
+    def __init__(self, model: str = "claude-sonnet-5-5", *, project_id: str | None = None, region: str | None = None,
+                 base_url: str | None = None, token_provider: Callable[[], str] | None = None, max_tokens: int = 2048,
+                 retries: int = 3, cache: bool = True, client: httpx.Client | None = None):
+        self.region = region or os.environ.get("CLOUD_ML_REGION") or "global"
+        super().__init__(model, max_tokens=max_tokens, retries=retries, cache=cache, client=client,
+                         base_url=base_url or os.environ.get("ANTHROPIC_VERTEX_BASE_URL") or vertex_base_url(self.region))
+        self.project_id = project_id or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+        if token_provider is None:
+            adc = _ADCToken()
+            token_provider, self.project_id = adc, self.project_id or adc.project_id
+        if not self.project_id:
+            raise ValueError("Claude on Vertex AI needs a Google Cloud project: set ANTHROPIC_VERTEX_PROJECT_ID")
+        self._token = token_provider
+
+    def _body(self, system: str, tools: Sequence[ToolSpec], max_tokens: int) -> dict[str, Any]:
+        body = super()._body(system, tools, max_tokens)
+        del body["model"]
+        body["anthropic_version"] = VERTEX_VERSION
+        return body
+
+    def _url(self) -> str:
+        return (f"{self.base_url}/projects/{self.project_id}/locations/{self.region}/publishers/anthropic/models/"
+                f"{self.model}:rawPredict")
+
+    def _headers(self) -> dict:
+        try:
+            token = self._token()
+        except Exception as exc:  # google-auth raises its own errors (RefreshError, TransportError)
+            raise LLMError(f"Google Cloud auth failed: {type(exc).__name__}: {exc}") from exc
+        return {"Authorization": f"Bearer {token}", "content-type": "application/json"}
 
 
 class OpenAICompatLLM:
@@ -279,9 +366,23 @@ class ScriptedLLM:
         return resp
 
 
+MODEL_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID", "OPENAI_API_KEY")  # any one configures a model
+
+
+def default_llm_name() -> str:
+    """``SUPPORT_AGENT_LLM`` if set; else Claude on Vertex AI when a Vertex project but no Anthropic key is configured."""
+    if os.environ.get("SUPPORT_AGENT_LLM"):
+        return os.environ["SUPPORT_AGENT_LLM"]
+    if os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID") and not os.environ.get("ANTHROPIC_API_KEY"):
+        return "vertex/claude-sonnet-5-5"
+    return "anthropic/claude-sonnet-5-5"
+
+
 def make_llm(provider: str, model: str | None = None, **kwargs) -> LLM:
     if provider == "anthropic":
         return AnthropicLLM(model or "claude-sonnet-5-5", **kwargs)
     if provider == "openai":
         return OpenAICompatLLM(model or "gpt-6-luna", **kwargs)
-    raise ValueError(f"unknown provider '{provider}' (anthropic | openai)")
+    if provider == "vertex":
+        return VertexLLM(model or "claude-sonnet-5-5", **kwargs)
+    raise ValueError(f"unknown provider '{provider}' (anthropic | vertex | openai)")
